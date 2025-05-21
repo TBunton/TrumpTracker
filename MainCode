@@ -1,0 +1,131 @@
+import os
+import time
+from itertools import islice
+from openai import OpenAI
+import tweepy
+
+# ─── 1. Hard-code your credentials or set them as environmental variables ─────────────────────────────────────────
+os.environ["TRUTHSOCIAL_USERNAME"] = 
+os.environ["TRUTHSOCIAL_PASSWORD"] = 
+consumer_key = 
+consumer_secret = 
+access_token = 
+access_token_secret = 
+
+
+from truthbrush.api import Api
+
+# ─── 2. Initialize the API clients─────────────────────────────────────────
+api = Api()  
+client_OpenAI = OpenAI(api_key=""
+)
+
+client_tweepy = tweepy.Client(
+    consumer_key=consumer_key,
+    consumer_secret=consumer_secret,
+    access_token=access_token,
+    access_token_secret=access_token_secret
+) 
+
+# ─── 3. Track the last seen post ID ────────────────────────────────────────
+# Initially None; only posts with a different ID will be printed
+last_seen_id = None
+
+#pulls truth social post text
+def fetch_latest():
+    """Fetch exactly the newest post (most recent) and return its dict."""
+    post_gen = api.pull_statuses(username="realDonaldTrump", replies=False, verbose=False)
+    latest = next(islice(post_gen, 1), None)
+    return latest
+
+#pulls truth social link
+def generate_post_link(post_id):
+    return f"https://truthsocial.com/@realDonaldTrump/posts/{post_id}"
+
+def analyze_post(input_text):
+    """Send Trump post to OpenAI for market analysis and return result."""
+    user_prompt = f"""
+You are a senior equity research analyst. You will be analyzing the following input, which is a Truth Social post made by Donald Trump. 
+These posts occasionally contain material information that may affect financial markets, sectors, or specific publicly traded equities.
+
+Your task is to:
+1. Determine whether the content contains *credible, market-relevant information* that could realistically affect the price of a public company or industry sector in the short term.
+2. If it does, provide a brief, *technical* explanation of why and how.
+3. List the 3 *most likely affected publicly traded companies* with the largest market caps using *ticker format*, e.g., $AAPL (Apple Inc).
+
+⚠️ IMPORTANT:
+- If the post contains **no credible or meaningful market-relevant content**, your entire response must be the single word: **Pineapple**
+- Do NOT include vague sector references or speculative associations (e.g., don’t mention media stocks just because celebrities are named)
+- Do NOT include companies unless the post could *reasonably* affect their valuation due to legal, policy, supply chain, economic, or operational consequences.
+
+Input:
+{input_text}
+"""
+
+    system_prompt = f"""
+You are a factual, conservative, and highly analytical equity research assistant.
+
+Your job is to assess whether a Truth Social post is *material to financial markets*. You must approach the task as a financial professional—not as a journalist or political analyst.
+
+Rules:
+- Do NOT speculate.
+- Do NOT infer relationships where none exist.
+- Do NOT hallucinate tickers or connections between topics and companies.
+- DO base all analysis on facts that would be accepted in an investment research note or Bloomberg terminal summary.
+
+Your response must follow this exact format:
+
+ANALYSIS: (write a short, clear explanation of how this affects the market, if at all. Use correct terminology. Be conservative—if there is *any* doubt about market impact, return "Pineapple")
+
+TICKERS: (only if there’s credible market impact; give 3 tickers with companies in this format: $TSLA (Tesla Inc), etc. If there is no impact, leave this line out entirely)
+
+If you are unsure whether it has a market impact, assume it does NOT. Err on the side of saying "Pineapple".
+"""
+
+    response = client_OpenAI.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0.2,
+        max_tokens=1000
+    )
+
+    return response.choices[0].message.content
+
+if __name__ == "__main__":
+    print("Starting Truth Social tracker. Checking every 2 minutes...\n")
+    while True:
+        try:
+            latest = fetch_latest()
+            if latest is None:
+                print("No posts returned.")
+            else:
+                current_id = latest["id"]
+                if current_id != last_seen_id:
+                    # New post detected!
+                    print(f"[{latest['created_at']}] New post:")
+                    print(latest["content"], end="\n\n")
+                    last_seen_id = current_id
+
+                    # Analyze the new post
+                    analysis = analyze_post(latest["content"])
+                    print(f"Market Analysis:\n{analysis}\n{'-'*80}\n")
+                    
+                    # Tweet new post if has actual estimated market effect
+                    if "Pineapple" not in analysis:
+                        post_link = generate_post_link(latest["id"])
+                        tweet_text = f"{post_link}\n\n{analysis}"
+                        response = client_tweepy.create_tweet(text=tweet_text)
+                        print(f"Tweet posted: https://twitter.com/user/status/{response.data['id']}")
+                    else:
+                       print("No significant market impact detected; tweet skipped.") 
+                
+                # if post pulled is the same as the last post
+                else:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No new post.")
+        except Exception as e:
+            print(f"Error fetching or analyzing post: {e}") 
+
+        time.sleep(2 * 60)
